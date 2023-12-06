@@ -36,62 +36,28 @@ df_return = df_return[['date', 'stock_code', 'return_5']]
 # df_return.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round2/return_data.feather")
 print("Loading return data finished.")
 
-def ts_pre_process(group):
-    price_adj = group.open.tolist()[0]
-    group.open = group.open / price_adj
-    group.high = group.high / price_adj
-    group.low = group.low / price_adj
-    group.close = group.close / price_adj
-    group.vwap = group.vwap / price_adj
-
-    volume_adj = group.volume.mean()
-    if volume_adj < 1e-14:
-        volume_adj = 1
-    group.volume = group.volume / volume_adj
-
-    return group
-
-def cs_pre_process(group):
-    if group.open.std() < 1e-14:
-        group.open = 0
-    else:
-        group.open = (group.open - group.open.mean()) / group.open.std()
-    group.high = (group.high - group.high.mean()) / group.high.std()
-    group.low = (group.low - group.low.mean()) / group.low.std()
-    group.close = (group.close - group.close.mean()) / group.close.std()
-    group.vwap = (group.vwap - group.vwap.mean()) / group.vwap.std()
-
-    if group.volume.std() < 1e-14:
-        group.volume = 0
-    else:
-        group.volume = (group.volume - group.volume.mean()) / group.volume.std()
-
-    return group
-
-def process_stock(stock):
+def process_stock(stock_seq):
+    stock = stack_index[stock_seq]
     if stock in df_rtn.index:
         stock_rtn = df_rtn.loc[stock, "return_5"]
         if ~np.isnan(stock_rtn):
-            x = torch.Tensor([df_window.loc[df_window.stock_code == stock, ["open", "high", "low", "close", "vwap", "volume"]].to_numpy()])
             y = stock_rtn
-            index = (date_current, stock)
-            return x, y, index
+            return y, stock_seq, stock
     return None, None, None
 
-n_jobs = 150
+n_jobs = 200
 window_size = 5
-train_sample_list = []
+train_loader = []
 train_index_list = []
-test_sample_list = []
+test_loader = []
 test_index_list = []
 
 for date_seq in tqdm(range(window_size-1,len(date_list))):
     
     date_current = date_list[date_seq]
-    print("Loading data at "+date_current.strftime("%Y-%m-%d"))
     df_rtn = df_return.loc[df_return.date == date_current, ["stock_code", "return_5"]].set_index("stock_code")
     data_type = "train" if date_current.strftime("%Y-%m-%d") < "2022-01-01" else "test"
-    
+
     date_window = date_list[date_seq-window_size+1:date_seq+1]
     window_stack = []
     for date in date_window:
@@ -105,29 +71,50 @@ for date_seq in tqdm(range(window_size-1,len(date_list))):
     df_window = pd.concat(window_stack, axis=0)
     if df_window.isna().any().any():
         print("The window " + date_current.strftime("%Y%m%d") + " contains unexpected NaN")
-        continue
-    df_window = df_window.groupby("stock_code").apply(ts_pre_process).reset_index(drop=True)
-    df_window = df_window.groupby("datetime").apply(cs_pre_process).reset_index(drop=True)
-    # df_window.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round2/"+data_type+"/"+date_current.strftime("%Y%m%d")+"_"+data_type+".feather")
-    
+
+    stack_index = []
+    stack_numpy = []
+    for df in df_window.groupby("stock_code"):
+        if len(df[1]) == 1190:
+            stack_index.append(df[0])
+            stack_numpy.append(df[1][["open", "high", "low", "close", "vwap", "volume"]].to_numpy())
+    stack_numpy = np.array(stack_numpy)
+    # ts_pre_process
+    price_adj = np.tile(stack_numpy[:,0,0][:,np.newaxis], (1,stack_numpy.shape[1]))
+    for price in range(5):
+        stack_numpy[:,:,price] /= price_adj
+    volume_adj = stack_numpy[:,:,5].mean(axis=1)
+    volume_adj = np.tile(np.where(volume_adj < 1e-14, 1, volume_adj)[:,np.newaxis], (1,stack_numpy.shape[1]))
+    stack_numpy[:,:,5] /= volume_adj
+    # cs_pre_process
+    for feat in range(6):
+        cs_mean = np.tile(stack_numpy[:,:,feat].std(axis=0)[np.newaxis,:], (stack_numpy.shape[0],1))
+        cs_std = np.tile(stack_numpy[:,:,feat].std(axis=0)[np.newaxis,:], (stack_numpy.shape[0],1))
+        stack_numpy[:,:,feat] = np.where(cs_std < 1e-14, np.zeros_like(stack_numpy[:,:,feat]), (stack_numpy[:,:,feat] - cs_mean) / cs_std)
+
     pool = Pool(n_jobs)
-    results = pool.map(process_stock, df_window.stock_code.unique())
+    results = pool.map(process_stock, range(len(stack_index)))
     pool.close()
     pool.join()
-    batch_X, batch_y, batch_index = [], [], []
+    batch_list = []
+    batch_y = []
+    batch_code = []
     for result in results:
-        x, y, index = result
-        if x is not None:
-            batch_X.append(x)
+        y, index, code = result
+        if y is not None:
             batch_y.append(y)
-            batch_index.append(index)
+            batch_list.append(index)
+            batch_code.append((date_current, code))
+    batch_X = torch.Tensor(stack_numpy[batch_list])
+    batch_y = torch.Tensor(np.array(batch_y)[:,np.newaxis])
 
     if data_type == "train":
-        train_sample_list.append((batch_X, batch_y))
-        train_index_list.append(batch_index)
+        train_loader.append((batch_X, batch_y))
+        train_index_list.append(batch_code)
     else:
-        test_sample_list.append((batch_X, batch_y))
-        test_index_list.append(batch_index)
+        test_loader.append((batch_X, batch_y))
+        test_index_list.append(batch_code)
+whole_index_list = train_index_list + test_index_list
 
 print("Data loading finished.")
 
@@ -151,13 +138,11 @@ class GRUNet(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout_rate if num_layers > 1 else 0)
-        # self.batch_norm = nn.BatchNorm1d(hidden_size)
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         out, _ = self.gru(x, h0)
-        # out = self.batch_norm(out)
         out = self.fc(out[:, -1, :])
         return out
 
@@ -175,49 +160,69 @@ test_acc = []
 for epoch in range(num_epochs):
     model.train()
     total_train_loss = 0
-    train_correct = 0
-    total_train = 0
 
     for seq, labels in train_loader:
         seq, labels = seq.to(device), labels.to(device)
         optimizer.zero_grad()
         y_pred = model(seq.float())
-        single_loss = criterion(y_pred.squeeze(), labels.float().squeeze())
-        single_loss.backward()
+        loss = criterion(y_pred.float(), labels.float())
+        loss.backward()
         optimizer.step()
         
-        total_train_loss += single_loss.item()
-        predicted = (y_pred > 0.5).float()
-        total_train += labels.size(0)
-        train_correct += (predicted == labels).sum().item()
-        
+        total_train_loss += loss.item()
+
     train_loss = total_train_loss / len(train_loader)
-    train_accuracy = train_correct / total_train
     train_losses.append(train_loss)
-    train_acc.append(train_accuracy)
-    print(f'Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}, Accuracy: {train_accuracy:.4f}')
+    print(f'Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}')
     
     model.eval()
     total_test_loss = 0
-    test_correct = 0
-    total_test = 0
 
     for seq, labels in test_loader:
         seq, labels = seq.to(device), labels.to(device)
         y_pred = model(seq.float())
-        single_loss = criterion(y_pred.squeeze(), labels.float().squeeze())
-        
-        total_test_loss += single_loss.item()
-        predicted = (y_pred > 0.5).float()
-        total_test += labels.size(0)
-        test_correct += (predicted == labels).sum().item()
-        
-    test_loss = total_test_loss / len(test_loader)
-    test_accuracy = test_correct / total_test
-    test_losses.append(test_loss)
-    test_acc.append(test_accuracy)
+        loss = criterion(y_pred.float(), labels.float())
+        total_train_loss += loss.item()
 
-    print(f'Epoch {epoch+1}/{num_epochs}, Loss: {test_loss:.4f}, Accuracy: {test_accuracy:.4f}')
+    train_loss = total_train_loss / len(train_loader)
+    train_losses.append(train_loss)
+    print(f'Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}')
 
-torch.save(model.state_dict(), '/mnt/research/data/temp/zhangsurui/E2E_NN/Round1/model_state_dict.pth')
+torch.save(model.state_dict(), '/mnt/research/data/temp/zhangsurui/E2E_NN/Round2/model_state_dict.pth')
 print('Finished Training')
+
+factor_name = "R2V1"
+model.eval()
+train_pred = []
+for seq, labels in train_loader:
+    seq, labels = seq.to(device), labels.to(device)
+    y_pred = model(seq.float())
+    y_pred = y_pred.to('cpu')
+    train_pred.append(y_pred.detach().numpy().reshape(-1).tolist())
+train_df = pd.DataFrame({"stock_code":[index[0] for index in train_index_list], "date":[index[1] for index in train_index_list], "factor_"+factor_name+"_train":train_pred})
+train_df.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round2/factor_"+factor_name+"_train.feather")
+test_pred = []
+for seq, labels in test_loader:
+    seq, labels = seq.to(device), labels.to(device)
+    y_pred = model(seq.float())
+    y_pred = y_pred.to('cpu')
+    test_pred.append(y_pred.detach().numpy().reshape(-1).tolist())
+test_df = pd.DataFrame({"stock_code":[index[0] for index in test_index_list], "date":[index[1] for index in test_index_list], "factor_"+factor_name+"_test":test_pred})
+test_df.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round1/factor_"+factor_name+"_test.feather")
+whole_df = pd.DataFrame({"stock_code":[index[0] for index in whole_index_list], "date":[index[1] for index in whole_index_list], "factor_"+factor_name:train_pred+test_pred})
+whole_df.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round1/factor_"+factor_name+".feather")
+
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(train_losses, label='Training Loss')
+plt.plot(test_losses, label='Validation Loss')
+plt.title("Training and Validation Loss")
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(train_acc, label='Training Accuracy')
+plt.plot(test_acc, label='Validation Accuracy')
+plt.title("Training and Validation Accuracy")
+plt.legend()
+
+plt.savefig("/mnt/research/data/temp/zhangsurui/E2E_NN/Round2/"+factor_name+".jpg")
