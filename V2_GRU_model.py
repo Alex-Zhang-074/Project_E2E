@@ -21,7 +21,7 @@ d = DataFeeder()
 api = DataAPI()
 
 data = pd.read_feather("/mnt/data/stocks/basic/processed_stock_trade_data.feather")
-data = data[data.date >= "2016-01-01"][['date', 'stock_code', 'open', 'high', 'low', 'close', 'volume', 'total_turnover']]
+data = data[data.date >= "2022-01-01"][['date', 'stock_code', 'open', 'high', 'low', 'close', 'volume', 'total_turnover']]
 data['vwap'] = data.total_turnover / data.volume
 date_list = data.date.unique().tolist()
 def process_stock_group(group):
@@ -56,7 +56,7 @@ for date_seq in tqdm(range(window_size-1,len(date_list))):
     
     date_current = date_list[date_seq]
     df_rtn = df_return.loc[df_return.date == date_current, ["stock_code", "return_5"]].set_index("stock_code")
-    data_type = "train" if date_current.strftime("%Y-%m-%d") < "2022-01-01" else "test"
+    data_type = "train" if date_current.strftime("%Y-%m-%d") < "2023-01-01" else "test"
 
     date_window = date_list[date_seq-window_size+1:date_seq+1]
     window_stack = []
@@ -90,7 +90,7 @@ for date_seq in tqdm(range(window_size-1,len(date_list))):
     for feat in range(6):
         cs_mean = np.tile(stack_numpy[:,:,feat].std(axis=0)[np.newaxis,:], (stack_numpy.shape[0],1))
         cs_std = np.tile(stack_numpy[:,:,feat].std(axis=0)[np.newaxis,:], (stack_numpy.shape[0],1))
-        stack_numpy[:,:,feat] = np.where(cs_std < 1e-14, np.zeros_like(stack_numpy[:,:,feat]), (stack_numpy[:,:,feat] - cs_mean) / cs_std)
+        stack_numpy[:,:,feat] = np.where(cs_std < 1e-10, np.zeros_like(stack_numpy[:,:,feat]), (stack_numpy[:,:,feat] - cs_mean) / (cs_std+1e-10))
 
     pool = Pool(n_jobs)
     results = pool.map(process_stock, range(len(stack_index)))
@@ -208,9 +208,9 @@ for seq, labels in test_loader:
     y_pred = y_pred.to('cpu')
     test_pred.append(y_pred.detach().numpy().reshape(-1).tolist())
 test_df = pd.DataFrame({"stock_code":[index[0] for index in test_index_list], "date":[index[1] for index in test_index_list], "factor_"+factor_name+"_test":test_pred})
-test_df.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round1/factor_"+factor_name+"_test.feather")
+test_df.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round2/factor_"+factor_name+"_test.feather")
 whole_df = pd.DataFrame({"stock_code":[index[0] for index in whole_index_list], "date":[index[1] for index in whole_index_list], "factor_"+factor_name:train_pred+test_pred})
-whole_df.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round1/factor_"+factor_name+".feather")
+whole_df.to_feather("/mnt/research/data/temp/zhangsurui/E2E_NN/Round2/factor_"+factor_name+".feather")
 
 plt.figure(figsize=(12, 5))
 plt.subplot(1, 2, 1)
